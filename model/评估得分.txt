@@ -1,0 +1,6 @@
+ train
+MSE 0.08864
+RMSE 0.29772
+ test
+MSE 0.11631
+RMSE 0.34105

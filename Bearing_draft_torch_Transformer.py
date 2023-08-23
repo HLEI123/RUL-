@@ -4,6 +4,7 @@ import sys
 import math
 from util.add_timestep import gen_test, Scoring_2008
 from util.tcn import TemporalConvNet
+from model import AE
 # from util.model_torch import Gating,Encoder,EncoderLayer,MultiHeadAttention
 
 import torch.nn.functional as F
@@ -12,6 +13,7 @@ import torch
 from torch import nn
 from torch import Tensor
 from torch import optim
+from torchsummary import summary
 from torch.utils.data import TensorDataset,DataLoader
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
@@ -30,16 +32,12 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print(device)
 
-
-# -------------------------------
-# 读取训练集
-# -------------------------------
 ####制作表头
 """这个需要你自己再csv的数据中提前把与处理好的FFT或者2560维度的原始振动数据中手动添加UnitNumber和RUL"""
 index_columns_names =  ["UnitNumber","RUL","ScaRUL"]##RUL做完了后自己先进行归一化，这样更加方便训练预测
 
 
-features_colums = ['s' + str(i) for i in range(1, 67)]###看你的数据维度，比如2560维度，那“67”就要改成2561
+features_colums = ['s' + str(i) for i in range(1, 2561)]###看你的数据维度，比如2560维度，那“67”就要改成2561
 input_file_column_names = index_columns_names + features_colums
 
 ####归一的函数
@@ -48,55 +46,66 @@ min_max_scaler = MinMaxScaler(feature_range=(0,1))
 max_ab_scaler = MaxAbsScaler()
 
 ###这个是数据集的根目录，到时候你自己修改，我直接把
-path_dir = "../赠送/PHM2012_工况一_测试集全寿命_EMD_IMF_data/train_cond1/"
+path_dir = "PHM2012/原始2560维振动数据/退化比例0.5/"
 
-bearing1_1 = pd.read_csv(path_dir+'EMD_Bearing1_1.csv', sep=",",
-                       names=index_columns_names+features_colums,header=0) #'FFT_1_1_hor.csv'
+bearing1_1 = pd.read_csv(path_dir+'bearing1_1.csv', sep=",",
+                       names=index_columns_names+features_colums,header=None) #'FFT_1_1_hor.csv'
                     #header=None表示第一行没有表头；=0表示第一行为表头
 bearing1_1
 
-bearing1_2 = pd.read_csv(path_dir+'EMD_Bearing1_2.csv', sep=",",
-                       names=index_columns_names+features_colums,header=0)
+bearing1_2 = pd.read_csv(path_dir+'bearing1_2.csv', sep=",",
+                       names=index_columns_names+features_colums,header=None)
                     #header=None表示第一行没有表头；=0表示第一行为表头
 bearing1_2
 
-bearing1_3 = pd.read_csv(path_dir+'EMD_Bearing1_3.csv', sep=",",
-                       names=index_columns_names+features_colums,header=0)
+bearing1_3 = pd.read_csv(path_dir+'bearing1_3.csv', sep=",",
+                       names=index_columns_names+features_colums,header=None)
                     #header=None表示第一行没有表头；=0表示第一行为表头
 bearing1_3
 
+bearing1_5 = pd.read_csv(path_dir+'bearing1_5.csv', sep=",",
+                       names=index_columns_names+features_colums,header=None)
+                    #header=None表示第一行没有表头；=0表示第一行为表头
+bearing1_5
 
-# ----------------------
-# 数据集制作
-# ----------------------
 ###要训练的轴承
+# dataset=pd.concat([bearing1_1,bearing1_2,bearing1_3],axis=0)
+# print(dataset.shape)
 train_df = pd.concat([bearing1_1,bearing1_2], axis=0)
 train_df
+val_df=bearing1_3
 
 ###要测试的轴承
-test_df = bearing1_3
+test_df = bearing1_5
 test_df
 
 ###时间步
 sequence_length = 64
 mask_value = 0
-feats =features_colums
-feats = ['s' + str(i) for i in range(1, 67)]##需要的特征数据维度，可以自己选择
+feats =['s' + str(i) for i in range(1, 1281)]
+# feats = ['s' + str(i) for i in range(1, 67)]##需要的特征数据维度，可以自己选择
 
 ### 数据集归一化
 """先使用fit_transform,后使用transform"""
 
 train_df[feats] = max_ab_scaler.fit_transform(train_df[feats])
+val_df[feats]=max_ab_scaler.transform(val_df[feats])
 test_df[feats] = max_ab_scaler.transform(test_df[feats])
 
-#生成带时间步的三维数据
+#生成带时间步的三维数据，前面添加空行，滑动步长为1，制作原始样本长度各序列样本
 x_train=np.concatenate(list(list(gen_test(train_df[train_df['UnitNumber']==unit], sequence_length, feats, mask_value))
                            for unit in train_df['UnitNumber'].unique()))#unique()获取唯一值
 print(x_train.shape)
+x_val=np.concatenate(list(list(gen_test(val_df[val_df['UnitNumber']==unit],sequence_length,feats,mask_value))
+                         for unit in val_df['UnitNumber'].unique()))
+print(x_val.shape)
 
 #t获取训练集RUL标签
 y_train = train_df.ScaRUL.values###这里的RUL是列名，如果不是这样命名要修改
 y_train.shape
+
+y_val=val_df.ScaRUL.values
+y_val.shape
 
 #生成带时间步的三维数据
 x_test=np.concatenate(list(list(gen_test(test_df[test_df['UnitNumber']==unit], sequence_length, feats, mask_value))
@@ -112,18 +121,29 @@ x_train = torch.Tensor(x_train)
 y_train = torch.Tensor(y_train)
 #x_vaild
 #y_vaild
+x_val=torch.Tensor(x_val)
+y_val=torch.Tensor(y_val)
 x_test = torch.Tensor(x_test)
 y_test = torch.Tensor(y_test)
 
-"""批大小提前在数据划分中自己定好，这是Torch中比较特殊的"""
-data_train_loader  = DataLoader(TensorDataset(x_train,y_train),shuffle=False,
-                               batch_size=128,num_workers=0)
+print("训练集的特征形状, x_train ：", x_train.shape)
+print("训练集的标签形状, y_train ：", y_train.shape)
+print("验证集的特征性状，x_val ：",x_val.shape)
+print("验证集的标签形状，y_val ：",y_val.shape)
+print("测试集的特征形状, x_test ：", x_test.shape)
+print("测试集的标签形状, y_test ：", y_test.shape)
+
+data_train_loader=DataLoader(TensorDataset(x_train,y_train),batch_size=128,shuffle=False,
+                            num_workers=0)
+data_val_loader=DataLoader(TensorDataset(x_val,y_val),batch_size=128,shuffle=False,num_workers=0)
+
+
 data_test_loader = DataLoader(TensorDataset(x_test,y_test),shuffle=False,
                              batch_size=128,num_workers=0)
 
 
 class PositionalEncoding(nn.Module):
-
+    # d_model数据特征维数，max_len最大序列长度
     def __init__(self, d_model, max_len=5000):
         super(PositionalEncoding, self).__init__()
         pe = torch.zeros(max_len, d_model)
@@ -139,17 +159,46 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:x.size(0), :]
 
 
+'''
+将输入数据进行特征提取，添加位置信息传入Transformer
+
+embedding_encoder:词嵌入模型，此处为autoencoder编码器
+embedding_size:autoencoder输出特征维度
+feature_size:Transformer输入特征维度(词嵌入输出维度)
+'''
+
+
+class Embedding(nn.Module):
+    def __init__(self, embedding_encoder, embedding_size=32, feature_size=128, dropout=0.05):
+        super(Embedding, self).__init__()
+        self.embedding_encoder = embedding_encoder
+        self.W_P = nn.Linear(embedding_size, feature_size)
+        self.position = PositionalEncoding(feature_size)
+        self.dropout = nn.Dropout()
+
+    def forward(self, x):
+        x = self.embedding_encoder(x)  # 进行特征提取
+        x = self.W_P(x)
+        x = self.position(x)  # 位置编码
+        x = self.dropout(x)
+
+        return x
+
+
 """这个就是transformer中的self attention的使用，这里是配合transformer中的Encoder一起使用"""
 
 
 class Transforemer_Encoder(nn.Module):
-    def __init__(self, feature_size, nhead, num_layers, dropout):
+    def __init__(self, embedding_encoder, embedding_size=32, feature_size=128, nhead=4, num_layers=2, dropout=0.2):
         super(Transforemer_Encoder, self).__init__()
         self.model_type = 'Transformer'
 
         self.src_mask = None
-        self.pos_encoder = PositionalEncoding(feature_size)
+        self.embedding = Embedding(embedding_encoder=embedding_encoder, embedding_size=embedding_size,
+                                   feature_size=feature_size)
+        # 定义每一个解码器块的参数
         self.encoder_layer = nn.TransformerEncoderLayer(d_model=feature_size, nhead=nhead, dropout=dropout)
+        # 定义整个transformer解码器的层数
         self.transformer_encoder = nn.TransformerEncoder(self.encoder_layer, num_layers=num_layers)
         self.decoder = nn.Linear(feature_size, 1)
         self.deco_output = nn.Linear(1, 1)
@@ -167,6 +216,7 @@ class Transforemer_Encoder(nn.Module):
             self.src_mask = mask
         #         #我觉得可以不要位置编码
         #         src = self.pos_encoder(src)
+        src = self.embedding(src)
         output = self.transformer_encoder(src, None)  # , self.src_mask)
         output = self.decoder(output)
         output = self.deco_output(output[:, -1, :])
@@ -214,7 +264,7 @@ def Epoch_evaluate(net, loader):
         preds = np.concatenate(preds)
         true = np.concatenate(true)
         #         val_score =np.float(Scoring_2008(true,preds))
-        return round(min_val_loss, 4), np.round(val_rmse, 4)
+        return round(min_val_loss, 5), np.round(val_rmse, 5)
 
 
 # 现在都是对的了
@@ -239,30 +289,78 @@ def Last_evaluate2(net, loader):
         min_val_loss = min_val_loss / i
         preds = np.concatenate(preds)
         true = np.concatenate(true)
-        return np.round(preds, 4), np.round(true, 2)
+        return np.round(preds, 4), np.round(true, 5)
+
+
+class AE(nn.Module):
+    def __init__(self):
+        super(AE, self).__init__()
+
+        # [b, 784] => [b, 20]
+        self.encoder = nn.Sequential(
+            nn.Linear(1280, 512),
+            nn.ReLU(),
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Linear(128, 32),
+            nn.ReLU()
+        )
+        # [b, 20] => [b, 784]
+        self.decoder = nn.Sequential(
+            nn.Linear(32, 128),
+            nn.ReLU(),
+            nn.Linear(128, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1280),
+            # nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        """
+        :param x: [b, 1, 28, 28]
+        :return:
+        """
+        batch_size = x.size(0)
+        # flatten
+        x = x.view(batch_size, 1280)
+        # encoder
+        x = self.encoder(x)
+        # decoder
+        x = self.decoder(x)
+        # reshape
+        x = x.view(batch_size, 1280)
+
+        return x, None
+
+
+autoencoder = AE()
+autoencoder.load_state_dict(torch.load("autoencoder_model.pth"))
+autoencoder.to(device)
+autoencoder.train()
 
 input_channels=x_train.shape[-1]
 seq_length =sequence_length
-epochs = 50
+epochs = 300
 steps = 0
 
 ###设置transformer的基本参数
-feature_size = input_channels  # 输入特征维度
+feature_size = 256  # 输入特征维度
 nhead = 2  #  multi-head attention 的头数
-num_layers = 1  # encoder layers 的层数
+num_layers = 2  # encoder layers 的层数
 dropout = 0.25
 
 # define and load model
-model = Transforemer_Encoder(feature_size, nhead, num_layers, dropout).to(device)
+model = Transforemer_Encoder(embedding_encoder=autoencoder.encoder,embedding_size=32,feature_size=feature_size,
+                             nhead=nhead, num_layers=num_layers, dropout=dropout).to(device)
 
 # initialize Adam optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-epoch_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode='min',factor=0.5,patience=50,
-                                                             min_lr=0.0001)###设置学习率下降策略，连续50次loss没有下降，学习率为原来的0.1倍，最小值为0.0001
+epoch_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,mode='min',factor=0.5,patience=50,min_lr=0.001)###设置学习率下降策略，连续50次loss没有下降，学习率为原来的0.1倍，最小值为0.0001
 Losses = nn.MSELoss()
 #"""这一步是打印你的TCN模型，14为特征维度，轴承数据看你的特征列数"""
-# summary(model,(sequence_length,input_channels))
+#summary(model,(sequence_length,input_channels))
+
 
 ###这个patience是连续150次，loss还是没有下降就停止运行
 patience = 100
@@ -275,7 +373,7 @@ val_loss = []
 all_epochs = []
 lr_step = []
 ###这个是模型权重的保存
-save_dir = "TorchModel_TCN_MA/"
+save_dir = "model/"
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
@@ -286,7 +384,7 @@ for epoch in range(1, epochs + 1):
     for batch_idx, (data, target) in enumerate(data_train_loader):
         total = 0
         data, target = data.to(device), target.to(device)
-        #data = data.view(-1, input_channels, seq_length)  # permute(0,2,1)
+        # data = data.view(-1, input_channels, seq_length)#permute(0,2,1)
         # 上述一步是Torch中卷积操作独有的，如果是LSTM，transformer可以注释掉这行代码
 
         optimizer.zero_grad()
@@ -311,7 +409,7 @@ for epoch in range(1, epochs + 1):
          这个在TensorFlow中始很容易实现，但是Torch中我这一块没有研究，我自己代码是以TF2.X框架为主
          这个你们需要自己去查查，怎么制作新的validdata
     """
-    min_val_loss, val_rmse = Epoch_evaluate(model, data_test_loader)  ###
+    min_val_loss, val_rmse = Epoch_evaluate(model, data_val_loader)  ###
 
     # 学习率衰减策略
     epoch_scheduler.step(min_val_loss)
@@ -340,115 +438,4 @@ for epoch in range(1, epochs + 1):
         counter += 1
     if counter == patience:
         break
-
-"""训练loss查看"""
-plt.grid(linestyle="--")
-plt.plot(all_epochs,train_loss)
-plt.plot(all_epochs,val_loss)
-plt.title('LN batch_size=128')
-plt.ylabel('Loss')
-plt.xlabel('Epochs')
-plt.legend(['loss', 'val_loss'], loc='upper right')
-plt.savefig('TorchModel/loss.png' ,bbox_inches='tight', dpi=300)  # 600
-plt.show()
-
-"""评估"""
-model.load_state_dict(torch.load(os.path.join(save_dir, "model_onTestBest.pth")))
-train_metrics=[]
-test_metrics =[]
-train_metrics = Epoch_evaluate(model,data_train_loader)
-test_metrics = Epoch_evaluate(model,data_test_loader)
-print('epoch [{}/{}], loss:{:.4f},     RMSE:{},'.format(best_epoch,epochs,train_metrics[0],train_metrics[1]))
-print('epoch [{}/{}], val_loss:{:.4f}, val_RMSE:{}'.format(best_epoch,epochs,test_metrics[0],test_metrics[1]))
-
-##保存评价指标：对于轴承
-df = pd.DataFrame({'MSE':[train_metrics[0]] ,
-                   'RMSE': [train_metrics[1]],})
-
-df.transpose().to_csv("TorchModel/评估得分.txt",
-                      mode='w',header=['train'],sep=' ',index=["MSE","RMSE"])
-df = pd.DataFrame({'MSE':[test_metrics[0]] ,
-                   'RMSE': [test_metrics[1]],})
-
-df.transpose().to_csv("TorchModel/评估得分.txt",
-                      mode='a',header=['test'],sep=' ',index=["MSE","RMSE"])
-
-#RUL预测与可视化
-##训练集的预测
-y_train_preds,y_train_true = Last_evaluate2(model,data_train_loader)
-
-"""保存预测的RUL值与实际的RUL值"""
-
-y_train_All=pd.DataFrame({'Pre':y_train_preds,
-                   'Actual':y_train_true})
-y_train_All.to_csv("TorchModel/y_train_Pre.csv",
-                      mode='w',header=["Pre","Actual"],sep=',',index=0)
-
-##测试集的预测
-y_test_preds,y_test_true = Last_evaluate2(model,data_test_loader)
-
-"""保存预测的RUL值与实际的RUL值"""
-
-y_All=pd.DataFrame({'Pre':y_test_preds,
-                   'Actual':y_test_true})
-y_All.to_csv("TorchModel/y_test_Pre.csv",
-                      mode='w',header=["Pre","Actual"],sep=',',index=0)
-
-# 可视化
-"""这里轴承的可视化，不包括ma、eam、SG滤波三种平滑方法，有兴趣自己添加或者再找我"""
-"""这里以XJTU-SY_Bearing_Datasets\37.5Hz11kN的数据集为例
-训练集:   Bearing2-1：长度491
-              Bearing2-2：长度161
-              Bearing2-3：长度533
-测试集:   Bearing2-4：长度42
-              Bearing2-5：长度339
-"""
-from sklearn.metrics import mean_squared_error
-
-
-def calculateScore(y_pred, y_test):
-    y_pred = list(map(lambda x: x[0], y_pred))
-    return mean_squared_error(y_pred, y_test)
-
-
-def plotUnitLines_y_test(y_test, y_pred, unit, Bpath='', figsize=[8, 6], plotname='', dirs=None):
-    mse = mean_squared_error(y_test, y_pred)
-
-    x = range(len(y_pred))
-
-    data_list = []
-
-    fig = plt.figure(figsize=figsize)
-
-    plt.plot(x, y_pred, color="red", label='原始预测', linewidth=1)
-    plt.plot(x, y_test, color='blue', label='实际值', linewidth=1)
-    plt.xlim(0, max(x))
-    plt.ylim(0, )
-    plt.grid(linestyle="--")
-    plt.title('Bearing1_' + str(unit) + ', MSE: ' + str('%.5f' % mse),
-              fontsize=12)
-    plt.ylabel('RUL(%)', fontsize=12)
-    plt.xlabel('Running Time (*10s)', fontsize=12)
-    plt.legend(fontsize=12)
-    fig.tight_layout()
-
-    if len(plotname) > 0:
-        save_dir = dirs + Bpath
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        plt.savefig(save_dir + plotname + ".png", bbox_inches='tight', dpi=300, format='png')  # 600
-        np.savetxt(save_dir + plotname + "RULPre.csv", y_pred)
-        np.savetxt(save_dir + plotname + "Act_RUL.csv", y_test)
-        np.savetxt(save_dir + plotname + "x_axis.csv", x)
-    plt.show()
-
-###训练集可视化
-plotUnitLines_y_test(y_train_preds[:2803], y_train[:2803], unit=1,
-                     Bpath="best_epoch_result/B1_1/", figsize=[8, 6], plotname='B1_1_', dirs=save_dir)
-plotUnitLines_y_test(y_train_preds[2803:2803+871], y_train[2803:2803+871], unit=2,
-                     Bpath="best_epoch_result/B1_2/", figsize=[8, 6], plotname='B1_2_', dirs=save_dir)
-
-###测试集可视化
-plotUnitLines_y_test(y_test_preds[:1802], y_test[:1802], unit=1,
-                     Bpath="best_epoch_result/B1_3/", figsize=[8, 6], plotname='B1_4_', dirs=save_dir)
 
